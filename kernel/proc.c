@@ -150,6 +150,7 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
+  p->tracemask=0;
 }
 
 // Create a user page table for a given process,
@@ -294,6 +295,9 @@ fork(void)
   pid = np->pid;
 
   np->state = RUNNABLE;
+
+  //从父进程复制tracemask
+  np->tracemask = p->tracemask;
 
   release(&np->lock);
 
@@ -692,4 +696,18 @@ procdump(void)
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
   }
+}
+
+uint64
+count_proc()
+{
+  int count = 0;
+  //遍历进程表
+  for(int i=0;i<NPROC;i++) {
+    if(proc[i].state!= UNUSED) {
+      count++;
+    } 
+  }
+
+  return count;
 }

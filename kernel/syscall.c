@@ -7,6 +7,15 @@
 #include "syscall.h"
 #include "defs.h"
 
+extern uint64 sys_trace(void);
+extern uint64 sys_info(void);
+
+static char* sys_call_name[]={"","fork","exit","wait","pipe","read",
+                              "kill","exec","fstat","chdir","dup",
+                              "getpid","sbrk","sleep","uptime","open",
+                              "write","mknod","unlink","link","mkdir",
+                              "close","trace","info"};
+
 // Fetch the uint64 at addr from the current process.
 int
 fetchaddr(uint64 addr, uint64 *ip)
@@ -127,6 +136,8 @@ static uint64 (*syscalls[])(void) = {
 [SYS_link]    sys_link,
 [SYS_mkdir]   sys_mkdir,
 [SYS_close]   sys_close,
+[SYS_trace]   sys_trace,
+[SYS_sysinfo]   sys_info
 };
 
 void
@@ -135,9 +146,12 @@ syscall(void)
   int num;
   struct proc *p = myproc();
 
-  num = p->trapframe->a7;
+  num = p->trapframe->a7;//系统调用号；a0：系统调用返回值
   if(num > 0 && num < NELEM(syscalls) && syscalls[num]) {
     p->trapframe->a0 = syscalls[num]();
+    if(p->tracemask&(1<<num)){
+      printf("%d: syscall %s -> %d\n", p->pid, sys_call_name[num], p->trapframe->a0);
+    }
   } else {
     printf("%d %s: unknown sys call %d\n",
             p->pid, p->name, num);

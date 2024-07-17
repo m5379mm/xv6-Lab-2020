@@ -14,10 +14,11 @@ void freerange(void *pa_start, void *pa_end);
 extern char end[]; // first address after kernel.
                    // defined by kernel.ld.
 
-struct run {
+struct run {//指向下一个空闲块
   struct run *next;
 };
 
+//全局变量keme，包含一个锁和一个空闲内存块链表头指针freelist
 struct {
   struct spinlock lock;
   struct run *freelist;
@@ -79,4 +80,20 @@ kalloc(void)
   if(r)
     memset((char*)r, 5, PGSIZE); // fill with junk
   return (void*)r;
+}
+
+uint64 mem_free(){
+  //定义指针
+  struct run *r;
+
+  //获取锁
+  acquire(&kmem.lock);
+  int i=0;
+  for(r=kmem.freelist;r;r=r->next){
+    i++;
+  }
+  //释放锁
+  release(&kmem.lock);
+  
+  return PGSIZE*i;
 }

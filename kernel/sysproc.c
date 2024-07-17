@@ -6,6 +6,10 @@
 #include "memlayout.h"
 #include "spinlock.h"
 #include "proc.h"
+#include "sysinfo.h"
+
+extern uint64 mem_free();
+extern uint64 count_proc();
 
 uint64
 sys_exit(void)
@@ -94,4 +98,32 @@ sys_uptime(void)
   xticks = ticks;
   release(&tickslock);
   return xticks;
+}
+
+uint64
+sys_trace(void)
+{
+  int mask;
+  argint(0,&mask);//argint是一个函数调用，通常用于从用户程序（在用户空间）传递的系统调用参数中提取整数值。
+  myproc()->tracemask=mask;//myproc() 是一个宏定义，用于获取当前进程（或线程）的 struct proc 结构体的指针。
+  return 0;
+}
+
+uint64
+sys_info(void)
+{
+  struct sysinfo* userInfo;
+  struct sysinfo sysData;
+  sysData.freemem = mem_free();
+  sysData.nproc = count_proc();
+  struct proc* curproc = myproc();
+  //argaddr 函数是在xv6操作系统中用于获取系统调用参数的地址的辅助函数
+  //进行类型转换
+  if(argaddr(0,(uint64 *)&userInfo)<0){
+    return -1;
+  }
+  if(copyout(curproc->pagetable, (uint64)userInfo, (char *)&sysData, sizeof(sysData)) < 0){
+    return -1;
+  }
+  return 0;
 }
