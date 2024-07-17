@@ -31,17 +31,18 @@ procinit(void)
   for(p = proc; p < &proc[NPROC]; p++) {
       initlock(&p->lock, "proc");
 
+      //一下部分被移动至allocproc
       // Allocate a page for the process's kernel stack.
       // Map it high in memory, followed by an invalid
       // guard page.
-      char *pa = kalloc();
+      /*char *pa = kalloc();
       if(pa == 0)
         panic("kalloc");
       uint64 va = KSTACK((int) (p - proc));
       kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
-      p->kstack = va;
+      p->kstack = va;*/
   }
-  kvminithart();
+  //kvminithart();//切换到全局内核页表
 }
 
 // Must be called with interrupts disabled,
@@ -121,6 +122,16 @@ found:
     return 0;
   }
 
+  // 初始化内核pagetable
+  p->kernelPagetable = userPagetableInit(); 
+  // 分配内存
+  char *pa = kalloc();
+  if (pa == 0)
+    panic("kalloc");
+  uint64 va = KSTACK((int)(p - proc));
+  procKvmmap(p->kernelPagetable,va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+  p->kstack = va;
+
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
@@ -150,6 +161,17 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
+  //释放内核栈
+  if(p->kstack){
+    pte_t *pte = walk(p->kernelPagetable,p->kstack,0);
+    kfree((void *)PTE2PA(*pte));
+    p->kstack=0;
+  }
+  //释放进程内核页表
+  if(p->kernelPagetable){
+    procFreewalk(p->kernelPagetable);
+  }
+  p->kernelPagetable=0;
 }
 
 // Create a user page table for a given process,
@@ -473,10 +495,14 @@ scheduler(void)
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
+        w_satp(MAKE_SATP(p->kernelPagetable));  // 将页表基地址加载到 satp 寄存器中
+        sfence_vma();                           // 执行 sfence.vma 指令以刷新 TLB
+        //切换进程上下文
         swtch(&c->context, &p->context);
-
+        kvminithart();//切换回kernel_pagetable,可以直接调用已有函数。
         // Process is done running for now.
         // It should have changed its p->state before coming back.
+        
         c->proc = 0;
 
         found = 1;

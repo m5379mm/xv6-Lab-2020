@@ -46,14 +46,45 @@ kvminit()
   // the highest virtual address in the kernel.
   kvmmap(TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
 }
+/*
+ * 进程页表初始化函数
+ */
+pagetable_t
+userPagetableInit()
+{
+  pagetable_t kpt = (pagetable_t) kalloc();
+  memset(kpt, 0, PGSIZE);
 
+  // uart registers
+  procKvmmap(kpt,UART0, UART0, PGSIZE, PTE_R | PTE_W);
+
+  // virtio mmio disk interface
+  procKvmmap(kpt,VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
+
+  // CLINT
+  procKvmmap(kpt,CLINT, CLINT, 0x10000, PTE_R | PTE_W);
+
+  // PLIC
+  procKvmmap(kpt,PLIC, PLIC, 0x400000, PTE_R | PTE_W);
+
+  // map kernel text executable and read-only.
+  procKvmmap(kpt,KERNBASE, KERNBASE, (uint64)etext-KERNBASE, PTE_R | PTE_X);
+
+  // map kernel data and the physical RAM we'll make use of.
+  procKvmmap(kpt,(uint64)etext, (uint64)etext, PHYSTOP-(uint64)etext, PTE_R | PTE_W);
+
+  // map the trampoline for trap entry/exit to
+  // the highest virtual address in the kernel.
+  procKvmmap(kpt,TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
+  return kpt;
+}
 // Switch h/w page table register to the kernel's page table,
 // and enable paging.
 void
 kvminithart()
 {
-  w_satp(MAKE_SATP(kernel_pagetable));
-  sfence_vma();
+  w_satp(MAKE_SATP(kernel_pagetable));  // 将页表基地址加载到 satp 寄存器中
+  sfence_vma();                         // 执行 sfence.vma 指令以刷新 TLB
 }
 
 // Return the address of the PTE in page table pagetable
@@ -121,18 +152,26 @@ kvmmap(uint64 va, uint64 pa, uint64 sz, int perm)
     panic("kvmmap");
 }
 
+// 映射函数
+void
+procKvmmap(pagetable_t kpt,uint64 va, uint64 pa, uint64 sz, int perm)
+{
+  if(mappages(kpt, va, sz, pa, perm) != 0)
+    panic("procKvmmap");
+}
+
 // translate a kernel virtual address to
 // a physical address. only needed for
 // addresses on the stack.
 // assumes va is page aligned.
 uint64
-kvmpa(uint64 va)
+kvmpa(pagetable_t kpt,uint64 va)
 {
   uint64 off = va % PGSIZE;
   pte_t *pte;
   uint64 pa;
   
-  pte = walk(kernel_pagetable, va, 0);
+  pte = walk(kpt, va, 0);
   if(pte == 0)
     panic("kvmpa");
   if((*pte & PTE_V) == 0)
@@ -277,6 +316,8 @@ freewalk(pagetable_t pagetable)
   // there are 2^9 = 512 PTEs in a page table.
   for(int i = 0; i < 512; i++){
     pte_t pte = pagetable[i];
+    //如果 pte 是有效的（PTE_V 标志为真）且不具有读、写、执行权限（PTE_R、PTE_W、PTE_X 均为假）
+    //则说明当前页表项指向的是一个更低级别的页表（子页表）
     if((pte & PTE_V) && (pte & (PTE_R|PTE_W|PTE_X)) == 0){
       // this PTE points to a lower-level page table.
       uint64 child = PTE2PA(pte);
@@ -287,6 +328,27 @@ freewalk(pagetable_t pagetable)
     }
   }
   kfree((void*)pagetable);
+}
+// 释放进程内核页表，但不释放数据页
+void
+procFreewalk(pagetable_t kpt)
+{
+  // there are 2^9 = 512 PTEs in a page table.
+  for(int i = 0; i < 512; i++){
+    pte_t pte = kpt[i];
+    //如果 pte 是有效的（PTE_V 标志为真）且不具有读、写、执行权限（PTE_R、PTE_W、PTE_X 均为假）
+    //则说明当前页表项指向的是一个更低级别的页表（子页表）
+    if((pte & PTE_V) && (pte & (PTE_R|PTE_W|PTE_X)) == 0){
+      // this PTE points to a lower-level page table.
+      uint64 child = PTE2PA(pte);
+      procFreewalk((pagetable_t)child);//递归删除
+      kpt[i] = 0;//子项删除完毕，删除当前项
+    } 
+    else{
+      kpt[i]=0;//设置为无效
+    }
+  }
+  kfree((void*)kpt);
 }
 
 // Free user memory pages,
@@ -439,4 +501,53 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   } else {
     return -1;
   }
+}
+
+void 
+reVmprint(pagetable_t pagetable, uint64 level)
+{
+    for (int i = 0; i < 512; i++)
+  {
+    pte_t pte = pagetable[i];
+    // 如果 pte 是有效的（PTE_V 标志为真）且不具有读、写、执行权限（PTE_R、PTE_W、PTE_X 均为假）
+    // 则说明当前页表项指向的是一个更低级别的页表（子页表）
+    // 非叶子页表项
+    if ((pte & PTE_V) && (pte & (PTE_R | PTE_W | PTE_X)) == 0)
+    {
+      // 输出'..'
+      for(int i=0;i<level;i++){
+        if(i==0){
+          printf("..");//第一个..前面不打印空格
+        }else{
+          printf(" ..");
+        }
+      }
+      uint64 child = PTE2PA(pte);
+      printf("%d: pte %p pa %p\n",i,pte,child);
+      reVmprint((pagetable_t)child,level+1);
+    }
+    // 叶子子表项
+    else if (pte & PTE_V)
+    {
+      // 输出'..'
+      for(int i=0;i<level;i++){
+        if(i==0){
+          printf("..");//第一个..前面不打印空格
+        }else{
+          printf(" ..");
+        }
+      }
+      uint64 child = PTE2PA(pte);
+      printf("%d: pte %p pa %p\n",i,pte,child);
+    }
+  }
+}
+
+int 
+vmprint(pagetable_t pagetable, uint64 level)
+{
+  // 输出参数
+  printf("page table %p\n", pagetable);
+  reVmprint(pagetable,1);
+  return 0;
 }
