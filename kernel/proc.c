@@ -31,18 +31,15 @@ procinit(void)
   for(p = proc; p < &proc[NPROC]; p++) {
       initlock(&p->lock, "proc");
 
-      //一下部分被移动至allocproc
-      // Allocate a page for the process's kernel stack.
-      // Map it high in memory, followed by an invalid
-      // guard page.
-      /*char *pa = kalloc();
-      if(pa == 0)
-        panic("kalloc");
-      uint64 va = KSTACK((int) (p - proc));
-      kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
-      p->kstack = va;*/
+      // 以下部分移动到allocproc
+      // char *pa = kalloc();
+      // if(pa == 0)
+      //   panic("kalloc");
+      // uint64 va = KSTACK((int) (p - proc));
+      // kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+      // p->kstack = va;
   }
-  //kvminithart();//切换到全局内核页表
+  kvminithart();
 }
 
 // Must be called with interrupts disabled,
@@ -122,14 +119,20 @@ found:
     return 0;
   }
 
-  // 初始化内核pagetable
-  p->kernelPagetable = userPagetableInit(); 
+  // 增加内核页表 
+  p->kpagetable = _kvminit();
+  if (p->kpagetable == 0) {
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+
   // 分配内存
-  char *pa = kalloc();
+  char* pa = kalloc();
   if (pa == 0)
     panic("kalloc");
   uint64 va = KSTACK((int)(p - proc));
-  procKvmmap(p->kernelPagetable,va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+  _kvmmap(p->kpagetable, va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
   p->kstack = va;
 
   // Set up new context to start executing at forkret,
@@ -141,6 +144,21 @@ found:
   return p;
 }
 
+// 释放内核页表辅助递归函数
+void proc_freekpagetable(pagetable_t kpagetable) {
+  for (int i = 0; i < 512; ++i) {
+    pte_t pte = kpagetable[i];
+    //如果 pte 是有效的（PTE_V 标志为真）且不具有读、写、执行权限（PTE_R、PTE_W、PTE_X 均为假）
+    //则说明当前页表项指向的是一个更低级别的页表（子页表）
+    if ((pte & PTE_V) && (pte & (PTE_R | PTE_W | PTE_X)) == 0) {
+      uint64 child = PTE2PA(pte);
+      proc_freekpagetable((pagetable_t)child);
+      kpagetable[i] = 0;
+    }
+  }
+  kfree((void*)kpagetable);
+}
+
 // free a proc structure and the data hanging from it,
 // including user pages.
 // p->lock must be held.
@@ -150,9 +168,23 @@ freeproc(struct proc *p)
   if(p->trapframe)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
+
+  // 释放内核栈
+  if (p->kstack) {
+    pte_t* pte = walk(p->kpagetable, p->kstack, 0);
+    if (pte == 0)
+      panic("freeproc: kstack");
+    kfree((void*)PTE2PA(*pte));
+  }
+  p->kstack = 0;
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
+  // 释放内核页表
+  if (p->kpagetable)
+    proc_freekpagetable(p->kpagetable);
+  p->kpagetable = 0;
+
   p->sz = 0;
   p->pid = 0;
   p->parent = 0;
@@ -161,17 +193,6 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
-  //释放内核栈
-  if(p->kstack){
-    pte_t *pte = walk(p->kernelPagetable,p->kstack,0);
-    kfree((void *)PTE2PA(*pte));
-    p->kstack=0;
-  }
-  //释放进程内核页表
-  if(p->kernelPagetable){
-    procFreewalk(p->kernelPagetable);
-  }
-  p->kernelPagetable=0;
 }
 
 // Create a user page table for a given process,
@@ -243,6 +264,9 @@ userinit(void)
   uvminit(p->pagetable, initcode, sizeof(initcode));
   p->sz = PGSIZE;
 
+  // 初始映射
+  uvm2kvm(p->pagetable, p->kpagetable, 0, p->sz);
+
   // prepare for the very first "return" from kernel to user.
   p->trapframe->epc = 0;      // user program counter
   p->trapframe->sp = PGSIZE;  // user stack pointer
@@ -265,12 +289,20 @@ growproc(int n)
 
   sz = p->sz;
   if(n > 0){
+    // PLIC限制
+    if(PGROUNDUP(sz+n)>=PLIC){
+      return -1;
+    }
     if((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
       return -1;
     }
   } else if(n < 0){
     sz = uvmdealloc(p->pagetable, sz, sz + n);
   }
+  
+  // 新映射实现
+  uvm2kvm(p->pagetable, p->kpagetable, sz - n, sz);
+
   p->sz = sz;
   return 0;
 }
@@ -296,6 +328,9 @@ fork(void)
     return -1;
   }
   np->sz = p->sz;
+
+  // 子进程内核页表映射
+  uvm2kvm(np->pagetable, np->kpagetable, 0, np->sz);
 
   np->parent = p;
 
@@ -495,14 +530,16 @@ scheduler(void)
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
-        w_satp(MAKE_SATP(p->kernelPagetable));  // 将页表基地址加载到 satp 寄存器中
-        sfence_vma();                           // 执行 sfence.vma 指令以刷新 TLB
-        //切换进程上下文
+
+        // 同时也要切换每个进程的内核页表 
+        w_satp(MAKE_SATP(p->kpagetable));
+        // 刷新快表 
+        sfence_vma();
         swtch(&c->context, &p->context);
-        kvminithart();//切换回kernel_pagetable,可以直接调用已有函数。
+        // 切换回全局的内核页表 
+        kvminithart();
         // Process is done running for now.
         // It should have changed its p->state before coming back.
-        
         c->proc = 0;
 
         found = 1;
