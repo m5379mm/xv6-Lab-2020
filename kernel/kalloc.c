@@ -23,10 +23,22 @@ struct {
   struct run *freelist;
 } kmem;
 
+//增加引用计数相关
+struct refCount{
+  struct spinlock lock;//自旋锁
+  int count[PHYSTOP/PGSIZE];//引用计数数组，每个页面一位
+}ref;
+
+// 获取内存引用计数
+int acqRefCount(void* pa){
+  return ref.count[(uint64)pa/PGSIZE];
+}
+
 void
 kinit()
 {
   initlock(&kmem.lock, "kmem");
+  initlock(&ref.lock, "ref");// 初始化锁
   freerange(end, (void*)PHYSTOP);
 }
 
@@ -35,8 +47,10 @@ freerange(void *pa_start, void *pa_end)
 {
   char *p;
   p = (char*)PGROUNDUP((uint64)pa_start);
-  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE)
+  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE){
+    ref.count[(uint64)p/PGSIZE]=1;
     kfree(p);
+  }
 }
 
 // Free the page of physical memory pointed at by v,
@@ -51,15 +65,21 @@ kfree(void *pa)
   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
 
-  // Fill with junk to catch dangling refs.
-  memset(pa, 1, PGSIZE);
+  // 检查引用计数
+  acquire(&ref.lock);
+  if (--ref.count[(uint64)pa / PGSIZE] == 0){
+    release(&ref.lock);
 
-  r = (struct run*)pa;
+    r = (struct run *)pa;
 
-  acquire(&kmem.lock);
-  r->next = kmem.freelist;
-  kmem.freelist = r;
-  release(&kmem.lock);
+    acquire(&kmem.lock);
+    r->next = kmem.freelist;
+    kmem.freelist = r;
+    release(&kmem.lock);
+  }
+  else{
+    release(&ref.lock);
+  }
 }
 
 // Allocate one 4096-byte page of physical memory.
@@ -71,12 +91,28 @@ kalloc(void)
   struct run *r;
 
   acquire(&kmem.lock);
-  r = kmem.freelist;
-  if(r)
-    kmem.freelist = r->next;
+  r = kmem.freelist;// 获取内存
+  if(r){
+    kmem.freelist = r->next;        // 分配内存
+    acquire(&ref.lock);             // 获取锁
+    ref.count[(uint64)r/PGSIZE]=1;  // 引用为1
+    release(&ref.lock);             // 释放锁
+  }
   release(&kmem.lock);
 
   if(r)
     memset((char*)r, 5, PGSIZE); // fill with junk
   return (void*)r;
+}
+
+// 用于增加引用计数
+int
+addRefCount(void* pa)
+{
+  if (((uint64)pa % PGSIZE) != 0 || (char *)pa < end || (uint64)pa >= PHYSTOP)
+    return -1;
+  acquire(&ref.lock);
+  ref.count[(uint64)pa / PGSIZE]++;// 引用计数+1
+  release(&ref.lock);
+  return 0;
 }
