@@ -1,0 +1,7 @@
+{
+    "C_Cpp.errorSquiggles": "disabled",
+    "files.associations": {
+        "spinlock.h": "c",
+        "proc.h": "c"
+    }
+}

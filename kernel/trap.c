@@ -67,7 +67,32 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
-  } else {
+  }
+  //为页面错误
+  else if(r_scause()==13||r_scause()==15){
+    uint64 va = r_stval();//找到虚地址
+    // 分配页面
+    uint64 pa = (uint64)kalloc();
+    // 分配失败
+    if(pa==0){
+      p->killed=1;
+    }  
+    // 超出实际分配大小或超出栈顶最大值
+    else if(va>=p->sz||va<=PGROUNDDOWN(p->trapframe->sp)){
+      kfree((void * )pa);
+      p->killed = 1;
+    }
+    else{
+      va = PGROUNDDOWN(va);
+      memset((void*)pa, 0, PGSIZE);
+      // 映射
+      if(mappages(p->pagetable,va,PGSIZE,pa,PTE_W|PTE_U|PTE_R)!=0){
+        kfree((void * )pa);
+        p->killed = 1;
+      }
+    }
+  }
+   else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     p->killed = 1;

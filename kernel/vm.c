@@ -5,6 +5,8 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "spinlock.h"  
+#include "proc.h"
 
 /*
  * the kernel's page table.
@@ -91,6 +93,7 @@ walk(pagetable_t pagetable, uint64 va, int alloc)
 // Look up a virtual address, return the physical address,
 // or 0 if not mapped.
 // Can only be used to look up user pages.
+//用于根据给定的虚拟地址（va）从页表中查找对应的物理地址（pa）
 uint64
 walkaddr(pagetable_t pagetable, uint64 va)
 {
@@ -101,10 +104,21 @@ walkaddr(pagetable_t pagetable, uint64 va)
     return 0;
 
   pte = walk(pagetable, va, 0);
-  if(pte == 0)
-    return 0;
-  if((*pte & PTE_V) == 0)
-    return 0;
+  //  处理页面分配和映射
+  if (pte == 0 || (*pte & PTE_V) == 0) {
+    struct proc *p = myproc();
+    // 检查虚拟地址是否超出实际分配大小或超出栈顶最大值
+    if(va >= p->sz || va < PGROUNDUP(p->trapframe->sp)) return 0;
+    // 分配物理页面
+    pa = (uint64)kalloc();
+    if (pa == 0) return 0; // 分配失败
+    // 映射页面
+    if (mappages(p->pagetable, va, PGSIZE, pa, PTE_W|PTE_R|PTE_U|PTE_X) != 0) {
+      kfree((void*)pa);// 释放已分配的物理页面
+	  return 0;
+    }
+	return pa;
+  }
   if((*pte & PTE_U) == 0)
     return 0;
   pa = PTE2PA(*pte);
@@ -181,9 +195,10 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
 
   for(a = va; a < va + npages*PGSIZE; a += PGSIZE){
     if((pte = walk(pagetable, a, 0)) == 0)
-      panic("uvmunmap: walk");
+      continue;
+    // 未分配，跳过即可，无需报错
     if((*pte & PTE_V) == 0)
-      panic("uvmunmap: not mapped");
+      continue;
     if(PTE_FLAGS(*pte) == PTE_V)
       panic("uvmunmap: not a leaf");
     if(do_free){
@@ -314,10 +329,10 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
-    if((pte = walk(old, i, 0)) == 0)
-      panic("uvmcopy: pte should exist");
-    if((*pte & PTE_V) == 0)
-      panic("uvmcopy: page not present");
+    if((pte = walk(old, i, 0)) == 0)//忽略
+      continue;
+    if((*pte & PTE_V) == 0)//忽略
+      continue;
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
     if((mem = kalloc()) == 0)
