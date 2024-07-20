@@ -103,4 +103,8 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+  uint64 interval;                // 一次alarm的间隔，如果为0，表示禁用
+  uint64 handler;              // 调用函数地址
+  int passedticks;             // 经过的时钟数的字段
+  struct trapframe *returnAddr; // 返回地址
 };

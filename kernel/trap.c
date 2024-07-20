@@ -37,21 +37,24 @@ void
 usertrap(void)
 {
   int which_dev = 0;
-
+  // 读取状态寄存器
+  // SSTATUS_SPP标识位，如果当前状态不是用户模式（即SSTATUS_SPP被设置）
+  // 则触发panic，表明这是一个严重错误，因为usertrap应该只从用户模式进入。
   if((r_sstatus() & SSTATUS_SPP) != 0)
     panic("usertrap: not from user mode");
 
   // send interrupts and exceptions to kerneltrap(),
   // since we're now in the kernel.
+  // 将中断和异常处理程序设置为内核模式下的处理程序。
   w_stvec((uint64)kernelvec);
 
   struct proc *p = myproc();
   
-  // save user program counter.
+  // 保存用户程序计数器
   p->trapframe->epc = r_sepc();
   
   if(r_scause() == 8){
-    // system call
+    // 表示这是一个系统调用
 
     if(p->killed)
       exit(-1);
@@ -76,7 +79,19 @@ usertrap(void)
   if(p->killed)
     exit(-1);
 
-  // give up the CPU if this is a timer interrupt.
+  if(which_dev==2){//检查是否为定时器中断
+    // 如果设置了定时器间隔，并且过去的定时器滴答数达到间隔
+    if(p->interval!=0&&++p->passedticks==p->interval){
+      // 使用 trapframe 后的一部分内存, trapframe大小为288B
+      // 因此只要在trapframe地址后288以上地址都可, 此处512只是为了取整数幂
+      p->returnAddr = p->trapframe + 512;  
+      memmove(p->returnAddr,p->trapframe,sizeof(struct trapframe)); 
+      // 将用户态程序计数器设置为用户定义的处理程序p->handler
+      // 这样当返回用户态时，会跳转到用户定义的处理程序执行。
+      p->trapframe->epc=p->handler;
+    }
+  }
+  // 定时器中断，让出cpu
   if(which_dev == 2)
     yield();
 
