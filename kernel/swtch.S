@@ -3,7 +3,9 @@
 #   void swtch(struct context *old, struct context *new);
 # 
 # Save current registers in old. Load from new.	
-
+# sd指令：将寄存器值存储到内存中
+# ld指令：从内存中加载
+# a0\a1：函数的前两个参数，根据 RISC-V 的调用约定，分别存储在寄存器 a0 和 a1 中。
 
 .globl swtch
 swtch:

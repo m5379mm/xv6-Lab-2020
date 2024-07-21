@@ -16,6 +16,10 @@ struct entry {
 struct entry *table[NBUCKET];
 int keys[NKEYS];
 int nthread = 1;
+// 锁相关
+pthread_mutex_t lock[NBUCKET];
+
+// 设置
 
 double
 now()
@@ -46,6 +50,7 @@ void put(int key, int value)
     if (e->key == key)
       break;
   }
+  pthread_mutex_lock(&lock[i]);//加锁
   if(e){
     // update the existing key.
     e->value = value;
@@ -53,8 +58,9 @@ void put(int key, int value)
     // the new is new.
     insert(key, value, &table[i], table[i]);
   }
+  pthread_mutex_unlock(&lock[i]);//释放锁
 }
-
+// 读：无需互斥读
 static struct entry*
 get(int key)
 {
@@ -114,7 +120,10 @@ main(int argc, char *argv[])
   for (int i = 0; i < NKEYS; i++) {
     keys[i] = random();
   }
-
+  // 初始化锁
+  for(int i=0;i<NBUCKET;i++){
+    pthread_mutex_init(&lock[i],NULL);
+  }
   //
   // first the puts
   //
