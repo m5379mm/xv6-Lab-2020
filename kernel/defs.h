@@ -67,6 +67,7 @@ void            ramdiskrw(struct buf*);
 void*           kalloc(void);
 void            kfree(void *);
 void            kinit(void);
+struct run*     steal(int cpuID);
 
 // log.c
 void            initlog(int, struct superblock*);

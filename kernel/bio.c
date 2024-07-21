@@ -22,35 +22,37 @@
 #include "defs.h"
 #include "fs.h"
 #include "buf.h"
+#define NBUCKET 13      // 哈希桶的个数
+#define HASH(dev, blockno) (((dev % NBUCKET + (blockno % NBUCKET)) % NBUCKET)) // 哈希函数
 
 struct {
   struct spinlock lock;
-  struct buf buf[NBUF];
-
-  // Linked list of all buffers, through prev/next.
-  // Sorted by how recently the buffer was used.
-  // head.next is most recent, head.prev is least.
-  struct buf head;
+  struct buf buf[NBUF];// 缓冲区数组
+  struct buf bufMap[NBUCKET];// 缓冲区对应的桶
+  struct spinlock bufMapLock[NBUCKET];
 } bcache;
 
 void
 binit(void)
 {
-  struct buf *b;
-
   initlock(&bcache.lock, "bcache");
 
-  // Create linked list of buffers
-  bcache.head.prev = &bcache.head;
-  bcache.head.next = &bcache.head;
-  for(b = bcache.buf; b < bcache.buf+NBUF; b++){
-    b->next = bcache.head.next;
-    b->prev = &bcache.head;
+  //初始化
+  for(int i=0;i<NBUCKET;i++){
+    initlock(&bcache.bufMapLock[i],"bcache_bufMap");
+    bcache.bufMap[i].next = 0;
+  }
+  for(int i=0;i<NBUF;i++){
+    struct buf *b = &bcache.buf[i];
     initsleeplock(&b->lock, "buffer");
-    bcache.head.next->prev = b;
-    bcache.head.next = b;
+    b->lastUse=0;
+    b->refcnt=0;
+    int num = HASH(b->dev, b->blockno); // 根据 dev 和 blockno 计算哈希值
+    b->next=bcache.bufMap[num].next;
+    bcache.bufMap[num].next=b;
   }
 }
+
 
 // Look through buffer cache for block on device dev.
 // If not found, allocate a buffer.
@@ -59,34 +61,64 @@ static struct buf*
 bget(uint dev, uint blockno)
 {
   struct buf *b;
+  int num = HASH(dev,blockno);
+  acquire(&bcache.bufMapLock[num]);
 
-  acquire(&bcache.lock);
-
-  // Is the block already cached?
-  for(b = bcache.head.next; b != &bcache.head; b = b->next){
+  // 是否已缓存
+  for(b = bcache.bufMap[num].next; b; b = b->next){
     if(b->dev == dev && b->blockno == blockno){
       b->refcnt++;
-      release(&bcache.lock);
+      release(&bcache.bufMapLock[num]);
       acquiresleep(&b->lock);
       return b;
     }
   }
-
-  // Not cached.
-  // Recycle the least recently used (LRU) unused buffer.
-  for(b = bcache.head.prev; b != &bcache.head; b = b->prev){
-    if(b->refcnt == 0) {
-      b->dev = dev;
-      b->blockno = blockno;
-      b->valid = 0;
-      b->refcnt = 1;
-      release(&bcache.lock);
-      acquiresleep(&b->lock);
-      return b;
+  release(&bcache.bufMapLock[num]);
+  acquire(&bcache.lock);
+  //检查是否存在未使用的缓冲区
+  struct buf *before=0;
+  uint hold=-1;
+  for(int i=0;i<NBUCKET;i++){
+    acquire(&bcache.bufMapLock[i]);
+    int find=0;
+    // 找到最久未使用的
+    for(b=&bcache.bufMap[i];b->next;b=b->next){
+      if(b->next->refcnt==0&&(!before||b->next->lastUse<before->next->lastUse)){
+        before=b;
+        find=1;
+      }
+    }
+    if(!find){// 未找到
+      release(&bcache.bufMapLock[i]);
+    }
+    else{
+      if(hold!=-1){
+        release(&bcache.bufMapLock[hold]);
+      }
+      hold=i;
     }
   }
-  panic("bget: no buffers");
+  if(!before){
+    panic("bget:no buffer");
+  }
+  b=before->next;
+  if(hold!=num){//新的桶
+    before->next = b->next;//移除
+    release(&bcache.bufMapLock[hold]);
+    acquire(&bcache.bufMapLock[num]);
+    b->next = bcache.bufMap[num].next;
+    bcache.bufMap[num].next=b;
+  }
+  b->dev=dev;
+  b->blockno=blockno;
+  b->refcnt=1;
+  b->valid=0;
+  release(&bcache.bufMapLock[num]);
+  release(&bcache.lock);
+  acquiresleep(&b->lock);
+  return b;
 }
+
 
 // Return a locked buf with the contents of the indicated block.
 struct buf*
@@ -121,33 +153,30 @@ brelse(struct buf *b)
 
   releasesleep(&b->lock);
 
-  acquire(&bcache.lock);
+  int num = HASH(b->dev,b->blockno);
+  acquire(&bcache.bufMapLock[num]);
   b->refcnt--;
   if (b->refcnt == 0) {
-    // no one is waiting for it.
-    b->next->prev = b->prev;
-    b->prev->next = b->next;
-    b->next = bcache.head.next;
-    b->prev = &bcache.head;
-    bcache.head.next->prev = b;
-    bcache.head.next = b;
+    b->lastUse=ticks;//最后使用时间设为滴答数
   }
   
-  release(&bcache.lock);
+  release(&bcache.bufMapLock[num]);
 }
 
 void
 bpin(struct buf *b) {
-  acquire(&bcache.lock);
+  int num = HASH(b->dev,b->blockno);
+  acquire(&bcache.bufMapLock[num]);
   b->refcnt++;
-  release(&bcache.lock);
+  release(&bcache.bufMapLock[num]);
 }
 
 void
 bunpin(struct buf *b) {
-  acquire(&bcache.lock);
+  int num = HASH(b->dev,b->blockno);
+  acquire(&bcache.bufMapLock[num]);
   b->refcnt--;
-  release(&bcache.lock);
+  release(&bcache.bufMapLock[num]);
 }
 
 
