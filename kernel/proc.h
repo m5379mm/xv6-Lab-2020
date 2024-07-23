@@ -1,3 +1,14 @@
+#define MAX_VMAS 16
+ struct vma{
+  int used;       // 用于标志是否已分配
+  uint64 addr;    // 映射区域的起始地址
+  int length;     // 映射区域的长度
+  int prot;       // 映射区域的权限
+  int flags;      // 映射区域的标志（共享、私有）
+  struct file* f;  // 映射的文件
+  int offset;     // 文件偏移量，恒为0
+ };
+
 // Saved registers for kernel context switches.
 struct context {
   uint64 ra;
@@ -103,4 +114,6 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+
+  struct vma vmaTable[MAX_VMAS];
 };

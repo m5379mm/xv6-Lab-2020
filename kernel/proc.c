@@ -5,6 +5,7 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "fcntl.h"
 
 struct cpu cpus[NCPU];
 
@@ -133,6 +134,11 @@ found:
   memset(&p->context, 0, sizeof(p->context));
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
+
+  // 初始化vma表
+  for(int i=0;i<MAX_VMAS;i++){
+    p->vmaTable[i].used=0;// 标为未使用
+  }
 
   return p;
 }
@@ -297,6 +303,13 @@ fork(void)
   np->cwd = idup(p->cwd);
 
   safestrcpy(np->name, p->name, sizeof(p->name));
+  // fork
+  for(i=0;i<MAX_VMAS;i++){
+    if(p->vmaTable[i].used==1){
+      memmove(&(np->vmaTable[i]), &(p->vmaTable[i]), sizeof(p->vmaTable[i]));
+      filedup(p->vmaTable[i].f);
+    }
+  }
 
   pid = np->pid;
 
@@ -343,6 +356,14 @@ exit(int status)
 
   if(p == initproc)
     panic("init exiting");
+  // exit
+  for(int i=0;i<MAX_VMAS;i++){
+    if (p->vmaTable[i].used){
+      filewrite(p->vmaTable[i].f, p->vmaTable[i].addr, p->vmaTable[i].length);
+    }
+    uvmunmap(p->pagetable,p->vmaTable[i].addr,p->vmaTable[i].length/PGSIZE,1);
+    p->vmaTable[i].used=0;
+  }
 
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){
