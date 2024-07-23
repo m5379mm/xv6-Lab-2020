@@ -7,16 +7,22 @@
 #include "defs.h"
 #include "e1000_dev.h"
 #include "net.h"
+//每个环将包含 16 个描述符。描述符用于指示 E1000 网络卡在内存中放置或获取数据包的位置。
 
 #define TX_RING_SIZE 16
+//传输环
 static struct tx_desc tx_ring[TX_RING_SIZE] __attribute__((aligned(16)));
+//mbuf 指针数组，与 tx_ring 对应。mbuf 结构用于存储网络数据包。
+//tx_mbufs 数组中的每个条目指向一个 mbuf，用于存放在 tx_ring 描述符中的数据包
 static struct mbuf *tx_mbufs[TX_RING_SIZE];
 
 #define RX_RING_SIZE 16
+//接收环或接收队列,当卡或驱动程序到达数组的末尾时，它会回到开头。
 static struct rx_desc rx_ring[RX_RING_SIZE] __attribute__((aligned(16)));
 static struct mbuf *rx_mbufs[RX_RING_SIZE];
 
-// remember where the e1000's registers live.
+// 指向 E1000 第一个控制寄存器的指针
+// 通过对 regs 指针进行操作，可以访问和修改 E1000 的控制寄存器，从而控制其操作，如启动传输或接收数据包，设置中断等。
 static volatile uint32 *regs;
 
 struct spinlock e1000_lock;
@@ -95,26 +101,51 @@ e1000_init(uint32 *xregs)
 int
 e1000_transmit(struct mbuf *m)
 {
-  //
-  // Your code here.
-  //
-  // the mbuf contains an ethernet frame; program it into
-  // the TX descriptor ring so that the e1000 sends it. Stash
-  // a pointer so that it can be freed after sending.
-  //
-  
+  uint32 tail;
+  struct tx_desc *desc;
+
+  acquire(&e1000_lock);
+  tail = regs[E1000_TDT];
+  desc = &tx_ring[tail];//取到末尾描述符，也就是拿到一个新的描述符
+  if((desc->status&E1000_TXD_STAT_DD)==0){//尚未完成相应的先前传输请求
+    return -1;
+  }
+  // 检查是否释放，及时释放以保证可用
+  if(tx_mbufs[tail]){
+    mbuffree(tx_mbufs[tail]);
+  }
+  desc->addr=(uint64)m->head;//指向的数据包的内容存储在 m->head 指向的内存区域中
+  desc->length=m->len;//数据包的长度
+  desc->cmd = E1000_TXD_CMD_EOP | E1000_TXD_CMD_RS;
+  tx_mbufs[tail] = m;
+   __sync_synchronize();
+  // 更新尾部指针
+  regs[E1000_TDT] = (tail + 1) % TX_RING_SIZE;
+  release(&e1000_lock);
   return 0;
 }
 
 static void
 e1000_recv(void)
 {
-  //
-  // Your code here.
-  //
-  // Check for packets that have arrived from the e1000
-  // Create and deliver an mbuf for each packet (using net_rx()).
-  //
+  uint32 head;
+  struct rx_desc *desc;
+
+  head = (regs[E1000_RDT] + 1) % RX_RING_SIZE;
+  desc = &rx_ring[head];
+  while (desc->status & E1000_RXD_STAT_DD) { // 完成相应的先前传输请求
+    rx_mbufs[head]->len = desc->length;
+    net_rx(rx_mbufs[head]);
+    rx_mbufs[head] = mbufalloc(0);
+    if(!rx_mbufs[head]){
+      panic("new buf create fail");
+    }
+    desc->addr = (uint64) rx_mbufs[head]->head;
+    desc->status=0;
+    head=(head+1)%RX_RING_SIZE;
+    desc=&rx_ring[head];
+  }
+  regs[E1000_RDT]=(head-1)%RX_RING_SIZE;
 }
 
 void
