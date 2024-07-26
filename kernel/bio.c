@@ -75,6 +75,16 @@ bget(uint dev, uint blockno)
   }
   release(&bcache.bufMapLock[num]);
   acquire(&bcache.lock);
+  for(b=bcache.bufMap[num].next;b;b=b->next){
+    if(b->dev==dev&&b->blockno==blockno){
+      acquire(&bcache.bufMapLock[num]);
+      b->refcnt++;
+      release(&bcache.bufMapLock[num]);
+      release(&bcache.lock);
+      acquiresleep(&b->lock);
+      return b;
+    }
+  }
   //检查是否存在未使用的缓冲区
   struct buf *before=0;
   uint hold=-1;
